@@ -17,6 +17,11 @@ struct Note {
   double duration;
 };
 
+struct Harmonic {
+  double amplitude;
+  double frequencyMultiplier;
+};
+
 class NotePlayer {
 public:
   // Constructor
@@ -114,26 +119,39 @@ private:
       double freq = calculate_frequency(note.pitch);
       double start_time = note.start_beat * 60.0 / tempo_;
       double duration_seconds = note.duration * 60.0 / tempo_;
-      generate_note_samples(*buffer_, freq, duration_seconds, start_time, 0.5);
+      generate_note_samples(*buffer_, freq, duration_seconds, start_time, 0.1);
     }
     std::cout << "Generated " << notes_.size() << " notes" << std::endl;
   }
 
   // Generate audio samples for a single note
   void generate_note_samples(std::vector<double> &buffer, double frequency, double duration, double start_time, double amplitude) const {
+    std::vector<Harmonic> harmonics = {
+      {1.00, 1},
+      {0.75, 2},
+      {0.50, 4},
+      {0.14, 8},
+      {0.05, 16},
+    };
+
     int num_samples = duration * SAMPLE_RATE;
     double sample_duration = 1.0 / SAMPLE_RATE;
     int start_sample = start_time * SAMPLE_RATE;
     int buffer_size = buffer.size(); // Get the size of the buffer
 
-    for (int i = 0; i < num_samples; ++i) {
-      int buffer_index = start_sample + i;
-      if (buffer_index >= buffer_size) {
-        break; // Stop writing samples if the buffer is full
-      }
+    for (const auto& harmonic : harmonics) {
+      double amp = harmonic.amplitude;
+      double freq_mult = harmonic.frequencyMultiplier;
 
-      double time = i * sample_duration;
-      buffer[buffer_index] += amplitude * std::sin(2 * M_PI * frequency * time);
+      for (int i = 0; i < num_samples; ++i) {
+        int buffer_index = start_sample + i;
+        if (buffer_index >= buffer_size) {
+          break; // Stop writing samples if the buffer is full
+        }
+
+        double time = i * sample_duration;
+        buffer[buffer_index] += amplitude * amp * std::sin(2 * M_PI * (frequency * freq_mult) * time);
+      }
     }
   }
 
