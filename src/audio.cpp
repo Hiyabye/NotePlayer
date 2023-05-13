@@ -1,13 +1,49 @@
-#include <cmath>
 #include <iostream>
-#include <algorithm>
-#include <cctype>
+#include <fstream>
+#include <cstdint>
+#include <string>
+#include <map>
 #include "audio.hpp"
-#include "note.hpp"
+#include "piano.hpp"
 
-// Create base frequencies for each note
-std::map<std::string, double> create_base_frequencies() {
-  std::map<std::string, double> base_frequencies = {
+// Constructor
+AudioFile::AudioFile(std::string& filename) {
+  // Checking if the file has the correct extension
+  if (!hasValidExtension(filename, ".txt")) {
+    std::cerr << "Error: Input file must have a .txt extension" << std::endl;
+    exit(1);
+  }
+  
+  // Opening the input file
+  inputFileStream.open(filename);
+  if (!inputFileStream) {
+    std::cerr << "Unable to open input file: " << filename << std::endl;
+    exit(1);
+  }
+
+  // Opening the output file
+  outputFileStream.open(filename.replace(filename.end()-3, filename.end(), "wav"), std::ios::binary);
+  if (!outputFileStream) {
+    std::cerr << "Unable to open output file: " << filename << std::endl;
+    exit(1);
+  }
+}
+
+// Destructor
+AudioFile::~AudioFile() {
+  inputFileStream.close();
+  outputFileStream.close();
+}
+
+// Checks if the filename has the correct extension
+bool AudioFile::hasValidExtension(const std::string& filename, const std::string& extension) {
+  return filename.size() >= extension.size() && filename.compare(filename.size()-extension.size(), extension.size(), extension) == 0;
+}
+
+// Calculates the frequency of a note
+double AudioFile::calculateFrequency(std::string pitch) {
+  // Base frequencies for different pitches
+  std::map<std::string, double> baseFrequencies = {
     {"Cb", 493.88}, {"C0", 523.25}, {"C#", 554.37},
     {"Db", 554.37}, {"D0", 587.33}, {"D#", 622.25},
     {"Eb", 622.25}, {"E0", 659.25}, {"E#", 698.46},
@@ -16,75 +52,98 @@ std::map<std::string, double> create_base_frequencies() {
     {"Ab", 830.61}, {"A0", 880.00}, {"A#", 932.33},
     {"Bb", 932.33}, {"B0", 987.77}, {"B#", 1046.50}
   };
-  return base_frequencies;
-}
 
-// Calculate frequency for a given note
-double calculate_frequency(const std::string &pitch) {
-  static const std::map<std::string, double> base_frequencies = create_base_frequencies();
+  std::string baseNote = pitch.substr(0, 2);
+  std::string octaveString = pitch.substr(3);
 
-  std::string base_note = pitch.substr(0, 2);
-  std::string octave_str = pitch.substr(3);
-
-  if (!std::all_of(octave_str.begin(), octave_str.end(), ::isdigit)) {
-    std::cerr << "Invalid octave: " << octave_str << std::endl;
+  if (!std::all_of(octaveString.begin(), octaveString.end(), ::isdigit)) {
+    std::cerr << "Invalid octave: " << octaveString << std::endl;
     exit(1);
   }
 
-  int octave = std::stoi(octave_str);
+  int octave = std::stoi(octaveString);
 
-  auto it = base_frequencies.find(base_note);
-  if (it != base_frequencies.end()) {
-    return it->second * std::pow(2, octave - 5);
+  auto it = baseFrequencies.find(baseNote);
+  if (it != baseFrequencies.end()) {
+    return it->second * pow(2, octave-5);
   } else {
-    std::cerr << "Invalid note: " << pitch << std::endl;
+    std::cerr << "Invalid pitch: " << pitch << std::endl;
     exit(1);
   }
 }
 
-// Generate audio samples for a single note
-void generate_note_samples(std::vector<double> &buffer, double frequency, double duration, double start_time, double amplitude) {
-  std::vector<Harmonic> harmonics = {
-    {1.00, 1},
-    {0.75, 2},
-    {0.50, 4},
-    {0.14, 8},
-    {0.05, 16},
-  };
+// Reads the input file
+void AudioFile::readInputFile(void) {
+  std::string line, pitch;
+  std::getline(inputFileStream, line); // First line is tempo (bpm)
+  tempo = std::stod(line);
+  std::getline(inputFileStream, line); // Second line is total beats
+  totalBeats = std::stod(line);
+  this->samplesBuffer = std::make_unique<std::vector<double>>(static_cast<size_t>(totalBeats * 60.0 / tempo * SAMPLE_RATE), 0.0);
 
-  int num_samples = duration * SAMPLE_RATE;
-  double sample_duration = 1.0 / SAMPLE_RATE;
-  int start_sample = start_time * SAMPLE_RATE;
-  int buffer_size = buffer.size(); // Get the size of the buffer
+  // Reading the notes
+  while (inputFileStream.good()) {
+    Note note;
+    inputFileStream >> note.startBeat;
+    inputFileStream >> pitch;
+    note.frequency = calculateFrequency(pitch);
+    inputFileStream >> note.duration;
+    std::getline(inputFileStream, line);
+    note.type = PIANO;
 
-  for (const auto& harmonic : harmonics) {
-    double amp = harmonic.amplitude;
-    double freq_mult = harmonic.frequency_multiplier;
+    notes.push_back(note);
+  }
+}
 
-    for (int i = 0; i < num_samples; ++i) {
-      int buffer_index = start_sample + i;
-      if (buffer_index >= buffer_size) {
-        break; // Stop writing samples if the buffer is full
-      }
+// Generates the audio samples for each note
+void AudioFile::generateAudioSamples(void) {
+  for (const auto& note : notes) {
+    double startTime = note.startBeat * 60.0 / tempo;
+    double durationSeconds = note.duration * 60.0 / tempo;
+    generatePianoNoteSample(*this->samplesBuffer, note.frequency, durationSeconds, startTime, 0.1);
+  }
+}
 
-      double time = i * sample_duration;
-      buffer[buffer_index] += amplitude * amp * std::sin(2 * M_PI * (frequency * freq_mult) * time);
+// Writes the WAV header to the output file
+void AudioFile::writeWavHeader(int numSamples) {
+  int chunkSize = numSamples * 2 + 36;
+  int byteRate = SAMPLE_RATE * 2;
+  int subchunk2Size = numSamples * 2;
+
+  outputFileStream << "RIFF";
+  outputFileStream.write(reinterpret_cast<const char *>(&chunkSize), 4);
+  outputFileStream << "WAVEfmt ";
+  outputFileStream.write("\x10\x00\x00\x00", 4);          // Subchunk1Size (16 for PCM)
+  outputFileStream.write("\x01\x00", 2);                  // AudioFormat (1 for PCM)
+  outputFileStream.write("\x01\x00", 2);                  // NumChannels (1 for mono)
+  outputFileStream.write(reinterpret_cast<const char *>(&SAMPLE_RATE), 4); // SampleRate
+  outputFileStream.write(reinterpret_cast<const char *>(&byteRate), 4); // ByteRate
+  outputFileStream.write("\x02\x00", 2);                  // BlockAlign (NumChannels * BitsPerSample / 8)
+  outputFileStream.write("\x10\x00", 2);                  // BitsPerSample (16 for PCM)
+  outputFileStream << "data";
+  outputFileStream.write(reinterpret_cast<const char *>(&subchunk2Size), 4); // Subchunk2Size
+}
+
+// Writes the audio samples to the output file
+void AudioFile::writeWavFile(const std::unique_ptr<std::vector<double>>& buffer) {
+  std::vector<double>::size_type numSamples = static_cast<std::vector<double>::size_type>(totalBeats * 60.0 / tempo * SAMPLE_RATE);
+
+  if (buffer->size() < numSamples) {
+    std::cerr << "Error: Buffer size is smaller than expected" << std::endl;
+    exit(1);
+  }
+
+  writeWavHeader(static_cast<int>(numSamples));
+
+  for (std::vector<double>::size_type i=0; i<numSamples; i++) {
+    double clippedValue = std::min(1.0, std::max(-1.0, (*buffer)[i])); // Clip values to [-1, 1]
+    int16_t sample = static_cast<int16_t>(clippedValue * 32767); // Convert to 16-bit integer
+    outputFileStream.write(reinterpret_cast<const char *>(&sample), sizeof(sample));
+    if (!outputFileStream.good()) {
+      std::cerr << "Error: Unable to write data to output file" << std::endl;
+      exit(1);
     }
   }
-}
 
-// Generate audio samples for each note
-std::unique_ptr<std::vector<double>> generate_audio_samples(double tempo, double total_beats, const std::vector<Note>& notes) {
-  auto buffer = std::make_unique<std::vector<double>>(static_cast<size_t>(total_beats * 60.0 / tempo * SAMPLE_RATE), 0.0);
-
-  // Generate the notes
-  for (const auto& note : notes) {
-    double freq = calculate_frequency(note.pitch);
-    double start_time = note.start_beat * 60.0 / tempo;
-    double duration_seconds = note.duration * 60.0 / tempo;
-    generate_note_samples(*buffer, freq, duration_seconds, start_time, 0.1);
-  }
-  std::cout << "Generated " << notes.size() << " notes" << std::endl;
-
-  return buffer;
+  std::cout << "Wrote " << numSamples << " samples to output file" << std::endl;
 }
